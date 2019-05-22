@@ -3,12 +3,14 @@
 
 #include "EngineUtils.h"
 #include "Landscape.h"
+#include "Camera/CameraComponent.h"
 #include "Components/InputComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/SkeletalMesh.h"
 #include "Kismet/GameplayStatics.h"
+#include "Sound/SoundCue.h"
 
 #include "RTSAttackComponent.h"
 #include "RTSAttackableComponent.h"
@@ -20,6 +22,7 @@
 #include "RTSConstructionSiteComponent.h"
 #include "RTSFogOfWarActor.h"
 #include "RTSGathererComponent.h"
+#include "RTSGameMode.h"
 #include "RTSNameComponent.h"
 #include "RTSOwnerComponent.h"
 #include "RTSPlayerAdvantageComponent.h"
@@ -38,6 +41,15 @@ ARTSPlayerController::ARTSPlayerController()
 {
     PlayerAdvantageComponent = CreateDefaultSubobject<URTSPlayerAdvantageComponent>(TEXT("Player Advantage"));
     PlayerResourcesComponent = CreateDefaultSubobject<URTSPlayerResourcesComponent>(TEXT("Player Resources"));
+
+  	// Set reasonable default values.
+    CameraSpeed = 1000.0f;
+    CameraZoomSpeed = 4000.0f;
+
+    MinCameraDistance = 500.0f;
+	MaxCameraDistance = 2500.0f;
+
+	CameraScrollThreshold = 20.0f;
 }
 
 void ARTSPlayerController::BeginPlay()
@@ -99,6 +111,7 @@ void ARTSPlayerController::SetupInputComponent()
 
 	InputComponent->BindAxis(TEXT("MoveCameraLeftRight"), this, &ARTSPlayerController::MoveCameraLeftRight);
 	InputComponent->BindAxis(TEXT("MoveCameraUpDown"), this, &ARTSPlayerController::MoveCameraUpDown);
+    InputComponent->BindAxis(TEXT("ZoomCamera"), this, &ARTSPlayerController::ZoomCamera);
 
 	InputComponent->BindAction(TEXT("ShowConstructionProgressBars"), IE_Pressed, this, &ARTSPlayerController::StartShowingConstructionProgressBars);
 	InputComponent->BindAction(TEXT("ShowConstructionProgressBars"), IE_Released, this, &ARTSPlayerController::StopShowingConstructionProgressBars);
@@ -192,9 +205,12 @@ bool ARTSPlayerController::GetSelectionFrame(FIntRect& OutSelectionFrame)
 		return false;
 	}
 
-	OutSelectionFrame = FIntRect(
-		FIntPoint(SelectionFrameMouseStartPosition.X, SelectionFrameMouseStartPosition.Y),
-		FIntPoint(MouseX, MouseY));
+    float MinX = FMath::Min(SelectionFrameMouseStartPosition.X, MouseX);
+    float MaxX = FMath::Max(SelectionFrameMouseStartPosition.X, MouseX);
+    float MinY = FMath::Min(SelectionFrameMouseStartPosition.Y, MouseY);
+    float MaxY = FMath::Max(SelectionFrameMouseStartPosition.Y, MouseY);
+
+	OutSelectionFrame = FIntRect(FIntPoint(MinX, MinY), FIntPoint(MaxX, MaxY));
 
 	return true;
 }
@@ -934,6 +950,13 @@ void ARTSPlayerController::SelectActors(TArray<AActor*> Actors)
 		if (SelectableComponent)
 		{
 			SelectableComponent->SelectActor();
+
+            // Play selection sound.
+            if (SelectionSoundCooldownRemaining <= 0.0f && IsValid(SelectableComponent->SelectedSound))
+            {
+                UGameplayStatics::PlaySound2D(this, SelectableComponent->SelectedSound);
+                SelectionSoundCooldownRemaining = SelectableComponent->SelectedSound->GetDuration();
+            }
 		}
 	}
 
@@ -1066,6 +1089,26 @@ bool ARTSPlayerController::CanPlaceBuilding_Implementation(TSubclassOf<AActor> B
 {
 	UWorld* World = GetWorld();
     return URTSUtilities::IsSuitableLocationForActor(World, BuildingClass, Location);
+}
+
+void ARTSPlayerController::Surrender()
+{
+    if (IsNetMode(NM_Client))
+    {
+        UE_LOG(LogRTS, Log, TEXT("%s surrenders the game."), *GetName());
+    }
+
+    ServerSurrender();
+}
+
+void ARTSPlayerController::GameHasEnded(class AActor* EndGameFocus /*= NULL*/, bool bIsWinner /*= false*/)
+{
+    ClientGameHasEnded(bIsWinner);
+}
+
+void ARTSPlayerController::ClientGameHasEnded_Implementation(bool bIsWinner)
+{
+    NotifyOnGameHasEnded(bIsWinner);
 }
 
 void ARTSPlayerController::StartSelectActors()
@@ -1400,6 +1443,24 @@ bool ARTSPlayerController::ServerStartProduction_Validate(AActor* ProductionActo
 	return ProductionActor->GetOwner() == this;
 }
 
+void ARTSPlayerController::ServerSurrender_Implementation()
+{
+    UE_LOG(LogRTS, Log, TEXT("%s surrenders the game."), *GetName());
+
+    // Notify game mode.
+    ARTSGameMode* GameMode = Cast<ARTSGameMode>(UGameplayStatics::GetGameMode(this));
+
+    if (GameMode != nullptr)
+    {
+        GameMode->NotifyOnPlayerDefeated(this);
+    }
+}
+
+bool ARTSPlayerController::ServerSurrender_Validate()
+{
+    return true;
+}
+
 void ARTSPlayerController::MoveCameraLeftRight(float Value)
 {
     CameraLeftRightAxisValue = Value;
@@ -1408,6 +1469,11 @@ void ARTSPlayerController::MoveCameraLeftRight(float Value)
 void ARTSPlayerController::MoveCameraUpDown(float Value)
 {
     CameraUpDownAxisValue = Value;
+}
+
+void ARTSPlayerController::ZoomCamera(float Value)
+{
+    CameraZoomAxisValue = Value;
 }
 
 void ARTSPlayerController::NotifyOnActorOwnerChanged(AActor* Actor)
@@ -1438,6 +1504,11 @@ void ARTSPlayerController::NotifyOnBuildingPlacementCancelled(TSubclassOf<AActor
 void ARTSPlayerController::NotifyOnErrorOccurred(const FString& ErrorMessage)
 {
     ReceiveOnErrorOccurred(ErrorMessage);
+}
+
+void ARTSPlayerController::NotifyOnGameHasEnded(bool bIsWinner)
+{
+    ReceiveOnGameHasEnded(bIsWinner);
 }
 
 void ARTSPlayerController::NotifyOnIssuedAttackOrder(APawn* OrderedPawn, AActor* Target)
@@ -1548,6 +1619,12 @@ void ARTSPlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
 
+    // Update sound cooldowns.
+    if (SelectionSoundCooldownRemaining > 0.0f)
+    {
+        SelectionSoundCooldownRemaining -= DeltaTime;
+    }
+
     APawn* PlayerPawn = GetPawn();
 
     if (!PlayerPawn)
@@ -1588,7 +1665,7 @@ void ARTSPlayerController::PlayerTick(float DeltaTime)
     // Apply input.
     CameraLeftRightAxisValue = FMath::Clamp(CameraLeftRightAxisValue, -1.0f, +1.0f);
     CameraUpDownAxisValue = FMath::Clamp(CameraUpDownAxisValue, -1.0f, +1.0f);
-    
+
     FVector Location = PlayerPawn->GetActorLocation();
     Location += FVector::RightVector * CameraSpeed * CameraLeftRightAxisValue * DeltaTime;
     Location += FVector::ForwardVector * CameraSpeed * CameraUpDownAxisValue * DeltaTime;
@@ -1597,6 +1674,17 @@ void ARTSPlayerController::PlayerTick(float DeltaTime)
     if (!CameraBoundsVolume || CameraBoundsVolume->EncompassesPoint(Location))
     {
         PlayerPawn->SetActorLocation(Location);
+    }
+
+    // Apply zoom input.
+    UCameraComponent* PlayerPawnCamera = PlayerPawn->FindComponentByClass<UCameraComponent>();
+
+    if (IsValid(PlayerPawnCamera))
+    {
+        FVector CameraLocation = PlayerPawnCamera->RelativeLocation;
+        CameraLocation.Z += CameraZoomSpeed * CameraZoomAxisValue * DeltaTime;
+        CameraLocation.Z = FMath::Clamp(CameraLocation.Z, MinCameraDistance, MaxCameraDistance);
+        PlayerPawnCamera->SetRelativeLocation(CameraLocation);
     }
 
 	// Get hovered actors.

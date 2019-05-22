@@ -32,6 +32,18 @@ public:
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTS|Camera", meta = (ClampMin = 0))
     float CameraSpeed;
 
+    /** How fast to zoom the camera in and out, in cm/sec. */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTS|Camera")
+    float CameraZoomSpeed;
+
+	/** Maximum distance of the camera from the player pawn, in cm. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTS|Camera", meta = (ClampMin = 0))
+	float MinCameraDistance;
+
+    /** Minimum distance of the camera from the player pawn, in cm. */
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTS|Camera", meta = (ClampMin = 0))
+	float MaxCameraDistance;
+
     /** Distance from the screen border at which the mouse cursor causes the camera to move, in pixels. */
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "RTS|Camera", meta = (ClampMin = 0))
 	int32 CameraScrollThreshold;
@@ -168,6 +180,16 @@ public:
 	bool CanPlaceBuilding(TSubclassOf<AActor> BuildingClass, const FVector& Location) const;
 	virtual bool CanPlaceBuilding_Implementation(TSubclassOf<AActor> BuildingClass, const FVector& Location) const;
 
+    /** Surrenders the current game. */
+    UFUNCTION(BlueprintCallable)
+    void Surrender();
+
+    virtual void GameHasEnded(class AActor* EndGameFocus = NULL, bool bIsWinner = false) override;
+
+    /** Notifies this client that the game has ended. */
+    UFUNCTION(Reliable, Client)
+    virtual void ClientGameHasEnded(bool bIsWinner);
+
 
 	/** Event when this player is now owning the specified actor. */
 	virtual void NotifyOnActorOwnerChanged(AActor* Actor);
@@ -186,6 +208,9 @@ public:
 
     /** Event when an error has occurred that can be presented to the user. */
     virtual void NotifyOnErrorOccurred(const FString& ErrorMessage);
+
+    /** Event when the game has ended. */
+    virtual void NotifyOnGameHasEnded(bool bIsWinner);
 
 	/** Event when an actor has received an attack order. */
 	virtual void NotifyOnIssuedAttackOrder(APawn* OrderedPawn, AActor* Target);
@@ -243,6 +268,10 @@ public:
     /** Event when an error has occurred that can be presented to the user. */
     UFUNCTION(BlueprintImplementableEvent, Category = "RTS|Error", meta = (DisplayName = "OnErrorOccurred"))
     void ReceiveOnErrorOccurred(const FString& ErrorMessage);
+
+    /** Event when the game has ended. */
+    UFUNCTION(BlueprintImplementableEvent, Category = "RTS|Game", meta = (DisplayName = "OnGameHasEnded"))
+    void ReceiveOnGameHasEnded(bool bIsWinner);
 
 	/** Event when an actor has received an attack order. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "RTS|Orders", meta = (DisplayName = "OnIssuedAttackOrder"))
@@ -304,6 +333,8 @@ private:
     /** Last vertical axis input applied to camera movement. */
     float CameraUpDownAxisValue;
 
+	/** Last zoom axis input applied to camera movement. */
+	float CameraZoomAxisValue;
 
 	/** Saved selections of this player. */
 	TArray<TArray<AActor*>> ControlGroups;
@@ -322,7 +353,6 @@ private:
 
 	/** Current cursor for placing a new building. */
 	ARTSBuildingCursor* BuildingCursor;
-
 
 	/** Whether we're currently creating a selection frame by dragging the mouse. */
 	bool bCreatingSelectionFrame;
@@ -344,6 +374,9 @@ private:
 
 	/** Whether to add clicked units to the current selection, if they're not already selected, and deselect them otherwise. */
 	bool bToggleSelectionHotkeyPressed;
+
+    /** Time to wait before playing the next selection sound, in seconds. */
+    float SelectionSoundCooldownRemaining;
 
 
     /** Provides bonuses for various gameplay elements for this player. */
@@ -410,11 +443,18 @@ private:
 	UFUNCTION(Reliable, Server, WithValidation)
 	void ServerCancelProduction(AActor* ProductionActor);
 
+    /** Surrenders the current match. */
+    UFUNCTION(Reliable, Server, WithValidation)
+    void ServerSurrender();
+
     /** Applies horizontal axis input to camera movement. */
     void MoveCameraLeftRight(float Value);
 
     /** Applies vertical axis input to camera movement. */
     void MoveCameraUpDown(float Value);
+
+    /** Applies zoom input to camera movement. */
+    void ZoomCamera(float Value);
 
     /** Remembers the current mouse position for multi-selection, finished by FinishSelectActors. */
     UFUNCTION()
